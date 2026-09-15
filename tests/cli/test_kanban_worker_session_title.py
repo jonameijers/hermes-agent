@@ -83,8 +83,9 @@ def test_explicit_title_wins_over_the_card(monkeypatch, fake_task):
     assert cli._pending_title == "chosen by the operator"
 
 
-def test_board_read_failure_does_not_block_the_worker(monkeypatch):
+def test_board_read_failure_does_not_block_the_worker(monkeypatch, fake_task):
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc")
+    fake_task("ignored")
     from hermes_cli import kanban_db
 
     def _boom(conn, tid):
@@ -93,4 +94,38 @@ def test_board_read_failure_does_not_block_the_worker(monkeypatch):
     monkeypatch.setattr(kanban_db, "get_task", _boom)
     cli = _cli(_FakeDB())
     cli_mod._seed_kanban_session_title(cli)
-    assert cli._pending_title is None
+    assert cli._pending_title == "Kanban task t_abc"
+
+
+@pytest.mark.parametrize('title', [None, '', '   '])
+def test_empty_task_title_uses_deduplicated_fallback(monkeypatch, fake_task, title):
+    monkeypatch.setenv('HERMES_KANBAN_TASK', 't_abc')
+    fake_task(title)
+    cli = _cli(_FakeDB(taken={'Kanban task t_abc'}))
+    cli_mod._seed_kanban_session_title(cli)
+    assert cli._pending_title == 'Kanban task t_abc #2'
+
+
+def test_missing_task_fallback_suppresses_model_upgrade(monkeypatch, fake_task, tmp_path):
+    from hermes_cli import kanban_db
+    from hermes_state import SessionDB
+    from agent import title_generator
+    from unittest.mock import Mock
+    monkeypatch.setenv('HERMES_KANBAN_TASK', 't_missing')
+    fake_task('ignored')
+    monkeypatch.setattr(kanban_db, 'get_task', lambda conn, tid: None)
+    db = SessionDB(tmp_path / 'state.db')
+    try:
+        db.create_session('worker', source='kanban')
+        cli = _cli(db)
+        cli_mod._seed_kanban_session_title(cli)
+        assert cli._pending_title == 'Kanban task t_missing'
+        # Same write used by agent setup for _pending_title.
+        db.set_session_title('worker', cli._pending_title)
+        generate = Mock()
+        monkeypatch.setattr(title_generator, 'generate_title', generate)
+        title_generator.auto_title_session(db, 'worker', 'Run the board task')
+        generate.assert_not_called()
+        assert db.get_session_title('worker') == 'Kanban task t_missing'
+    finally:
+        db.close()

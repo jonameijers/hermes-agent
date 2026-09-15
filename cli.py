@@ -4183,24 +4183,27 @@ def _seed_kanban_session_title(cli) -> None:
     task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
     if not task_id or getattr(cli, "_pending_title", None):
         return
+    title = f"Kanban task {task_id}"
     try:
         from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_db_connect as _kbc
 
         with _kbc.connect_closing() as conn:
             task = _kb.get_task(conn, task_id)
-        title = (getattr(task, "title", "") or "").strip() if task is not None else ""
-        if not title:
-            return
+        task_title = (getattr(task, "title", "") or "").strip() if task is not None else ""
+        title = task_title or title
+    except Exception as exc:
+        logger.debug("kanban task title lookup failed: %s", exc)
+    try:
         # Session titles are unique: a re-dispatched card (retry, second run) would collide and
         # end up untitled, which defeats the point. Take the next title in the lineage instead.
         db = getattr(cli, "_session_db", None)
         if db is not None and db.get_session_by_title(title):
             title = db.get_next_title_in_lineage(title) or title
-        cli._pending_title = title
     except Exception as exc:
-        # Best-effort naming; an untitled worker still does the task.
+        # A failed lineage lookup must not discard the available fallback.
         logger.debug("kanban session title seed failed: %s", exc)
+    cli._pending_title = title
 
 
 def _collect_kanban_task_images(single_query_images):
