@@ -69,6 +69,7 @@ _CONTAINER_KEYS = (
     ("docker_env", {}), ("docker_run_as_host_user", False), ("docker_extra_args", []),
     ("docker_shm_size", "1g"), ("docker_network", True), ("docker_persist_across_processes", True),
     ("docker_shared_container_key", ""), ("docker_orphan_reaper", True), ("docker_snap_compat", False),
+    ("docker_image_pinned", False),
 )
 _DOCKER_KWARGS = (
     ("volumes", "docker_volumes", []), ("auto_mount_cwd", "docker_mount_cwd_to_workspace", False),
@@ -76,7 +77,7 @@ _DOCKER_KWARGS = (
     ("run_as_host_user", "docker_run_as_host_user", False), ("network", "docker_network", True),
     ("extra_args", "docker_extra_args", []), ("persist_across_processes", "docker_persist_across_processes", True),
     ("shared_container_key", "docker_shared_container_key", ""), ("shm_size", "docker_shm_size", "1g"),
-    ("snap_compat", "docker_snap_compat", False),
+    ("snap_compat", "docker_snap_compat", False), ("image_pinned", "docker_image_pinned", False),
 )
 
 
@@ -86,8 +87,12 @@ def _ssh_config_from_config(config: Dict[str, Any]) -> dict:
 
 
 def _container_config_from_config(config: Dict[str, Any]) -> dict:
-    """``container_config`` for :func:`_create_environment` (shared with the lazy ``ensure_task_env``)."""
-    return {k: config.get(k, d) for k, d in _CONTAINER_KEYS}
+    """``container_config`` for :func:`_create_environment` (shared with the lazy ``ensure_task_env``):
+    the built-in defaults plus every other config key unchanged, so a plugin-registered backend can read
+    its own keys without core enumerating them."""
+    shaped = {k: config.get(k, d) for k, d in _CONTAINER_KEYS}
+    shaped.update({key: value for key, value in config.items() if key not in shaped})
+    return shaped
 
 
 def _resources(cc: Dict[str, Any]) -> dict:
@@ -127,7 +132,8 @@ def _modal_unavailable_reason(modal_state: Dict[str, Any]) -> tuple[str, str]:
             f"Modal backend selected but no direct Modal credentials/config {found}.")
 
 
-# --- Environment builders. Signature: (*, env_type, image, cwd, timeout, cc, task_id, ssh_config, host_cwd)
+# --- Environment builders. Signature: (*, image, cwd, timeout, cc, task_id, ssh_config, host_cwd)
+# (env_type is only forwarded to the plugin-registry fallback, not to the built-in builders.)
 def _build_local_env(*, cwd, timeout, **_):
     return _LocalEnvironment(cwd=cwd, timeout=timeout)
 
@@ -243,9 +249,20 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     for local/ssh/vercel; ``container_config`` carries the container_*/docker_* resource keys; ``host_cwd`` is
     the host dir bound into Docker when cwd mounting is enabled. ``probe_only`` asks ssh for a throwaway
     connection with no remote setup/sync (the prompt-time probe). Unknown types fall through to plugin backends."""
-    builder = _ENV_BUILDERS.get(env_type, _build_plugin_env)
-    return builder(env_type=env_type, image=image, cwd=cwd, timeout=timeout, cc=container_config or {},
-                   task_id=task_id, ssh_config=ssh_config, host_cwd=host_cwd, probe_only=probe_only)
+    builder = _ENV_BUILDERS.get(env_type)
+    kwargs = dict(image=image, cwd=cwd, timeout=timeout, cc=container_config or {}, task_id=task_id,
+                  ssh_config=ssh_config, host_cwd=host_cwd, probe_only=probe_only)
+    if builder is not None:
+        env = builder(**kwargs)
+    else:
+        env = _build_plugin_env(env_type=env_type, **kwargs)
+    # Backend tag for consumers that only hold the instance (cwd sanitizers on
+    # live cached envs); __slots__ plugin providers simply keep going untagged.
+    try:
+        env.env_type = env_type
+    except Exception:
+        pass
+    return env
 
 
 # --- Requirement checkers: one generic path driven by _BACKEND_SPECS; optional fields, checked in order:
@@ -263,7 +280,8 @@ def _check_vercel(config: Dict[str, Any]) -> bool:
         return _reject(f"Vercel Sandbox does not support custom TERMINAL_CONTAINER_DISK={disk}. "
                        "Use the default shared setting (51200 MB).")
     if importlib.util.find_spec("vercel") is None:
-        return _reject("vercel is required for the Vercel Sandbox terminal backend: pip install vercel")
+
+        return _reject("vercel is required for the Vercel Sandbox terminal backend. Run hermes setup terminal and select Vercel Sandbox.")
     from agent.secret_scope import get_secret
     if get_secret("VERCEL_OIDC_TOKEN"):
         return True
@@ -306,7 +324,7 @@ _BACKEND_SPECS: Dict[str, Dict[str, Any]] = {
     "singularity": {"binary": (lambda: shutil.which("apptainer") or shutil.which("singularity"), "--version", None)},
     "ssh": {"pre": _ssh_pre},
     "modal": {"pre": _modal_pre,
-              "module": ("modal", "modal is required for direct modal terminal backend: pip install modal")},
+              "module": ("modal", "modal is required for direct modal terminal backend. Run hermes setup terminal and select Modal.")},
     "vercel_sandbox": {"pre": _check_vercel},
     "daytona": {"post": _daytona_post},
 }

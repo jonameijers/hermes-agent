@@ -233,7 +233,7 @@ def _safe_skills_path(skills_dir: Path) -> str:
 
 def iter_skills_files(container_base: str = "/root/.hermes") -> List[Dict[str, str]]:
     """Per-file entries for all skills files (for backends that upload individually)."""
-    return [_mount(item, f"{container_root}/{item.relative_to(host_dir)}")
+    return [_mount(item, f"{container_root}/{item.relative_to(host_dir).as_posix()}")
             for host_dir, container_root in _skill_dir_roots(container_base)
             for _base, files in _walk_skill_tree(host_dir) for item in files]
 
@@ -258,6 +258,13 @@ _CACHE_DIRS: list[tuple[str, str]] = [
     # Mount it so the agent's file tools can read dropped binaries (zip/pdf/...) from inside sandbox
     # containers instead of dangling host paths (#76577).
     ("attachments", "attachments"),
+    # Desktop stages a large plain-text paste as a `.txt` under this Hermes-managed dir
+    # (apps/desktop/electron/composer-paste.ts; `COMPOSER_PASTES_DIRNAME` in
+    # agent/context_references.py) and attaches it as `@file:`. Without a mount/sync
+    # entry, remote execution backends (ssh/daytona/vercel_sandbox) never received the
+    # bytes and `to_agent_visible_cache_path` left the gateway-host path dangling on
+    # the remote host (#110174). No legacy alias, so both tuple slots match.
+    ("composer-pastes", "composer-pastes"),
 ]
 
 
@@ -304,14 +311,18 @@ def map_cache_path_to_container(host_path: str, container_base: str = "/root/.he
 
 
 def from_agent_visible_cache_path(container_path: str, container_base: str = "/root/.hermes") -> str:
-    """Inverse of :func:`to_agent_visible_cache_path`; unchanged unless the backend maps cache paths."""
+    """Inverse of :func:`to_agent_visible_cache_path` for Docker and for plugin backends that declare
+    ``cache_path_base``; any other backend, or a path outside the cache mounts, is returned unchanged."""
     backend = _terminal_backend()
     if backend != "docker":
-        from agent.terminal_env_registry import provider_flag
-        base = provider_flag(backend, "cache_path_base", None)
-        if not base:
+        try:
+            from agent.terminal_env_registry import provider_flag
+            plugin_base = provider_flag(backend, "cache_path_base", None)
+        except Exception:
+            plugin_base = None
+        if not plugin_base:
             return container_path
-        container_base = str(base)
+        container_base = str(plugin_base)
     mapped = _remap_cache_path(container_path, container_base, "container_path", "host_path", lambda root, rel: str(Path(root) / rel))
     return mapped if mapped is not None else container_path
 
