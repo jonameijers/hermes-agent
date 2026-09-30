@@ -362,6 +362,7 @@ DEFAULT_CONFIG = {
         "apple_container_image": "python:3.11-slim-bookworm",
         "apple_container_volumes": [],
         "apple_container_extra_args": [],
+        "apple_container_mount_cwd_to_workspace": False,
         "vercel_image": DEFAULT_VERCEL_IMAGE,  # vercel_sandbox backend only: a Vercel-managed or VCR image
         "vercel_runtime": "",  # deprecated by Vercel; a legacy runtime pin (node24 | node22 | python3.13) overrides vercel_image
         # Container limits (docker, singularity, modal, daytona, vercel_sandbox; not local/ssh).
